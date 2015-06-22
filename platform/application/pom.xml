@@ -28,7 +28,6 @@
         <maven.test.skip>true</maven.test.skip>
     </properties>
 
-
     <dependencies>
 
         <dependency>
@@ -119,6 +118,12 @@
             <version>${project.version}</version>
         </dependency>
 
+        <dependency>
+            <groupId>org.mayocat.platform</groupId>
+            <artifactId>mayocat-platform-webhooks</artifactId>
+            <version>${project.version}</version>
+        </dependency>
+
         <!-- XWiki -->
         <dependency>
             <groupId>org.xwiki.commons</groupId>
@@ -139,19 +144,6 @@
             <version>${dropwizard.version}</version>
         </dependency>
 
-        <!-- Drop Wizard Swagger -->
-        <dependency>
-            <groupId>io.federecio</groupId>
-            <artifactId>dropwizard-swagger</artifactId>
-            <version>0.5.2</version>
-            <exclusions>
-              <exclusion>
-                <groupId>org.reflections</groupId>
-                <artifactId>reflections</artifactId>
-              </exclusion>
-            </exclusions>
-        </dependency>
-
         <!-- Testing dependencies -->
         <dependency>
             <groupId>org.xwiki.commons</groupId>
@@ -170,8 +162,7 @@
                 </exclusion>
             </exclusions>
         </dependency>
-
-
+        
         <!-- Need to drag this for some reason -->
         <dependency>
             <groupId>ch.qos.logback</groupId>

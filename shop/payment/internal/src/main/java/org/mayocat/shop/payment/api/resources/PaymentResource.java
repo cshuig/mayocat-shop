@@ -8,6 +8,8 @@
 package org.mayocat.shop.payment.api.resources;
 
 import com.google.common.base.Strings;
+import javax.ws.rs.core.Context;
+import javax.ws.rs.core.UriInfo;
 import org.mayocat.rest.Resource;
 import org.mayocat.rest.annotation.ExistingTenant;
 import org.mayocat.shop.payment.GatewayException;
@@ -71,19 +73,18 @@ public class PaymentResource implements Resource
 
         try {
             response = gateway.acknowledge(orderId, data);
-            PaymentOperation op = response.getOperation();
-            op.setOrderId(orderId);
-            paymentOperationStore.get().create(op);
+            if (response != null && response.getOperation() != null) {
+                PaymentOperation op = response.getOperation();
+                op.setOrderId(orderId);
+                paymentOperationStore.get().create(op);
 
-            observationManager.notify(new PaymentOperationEvent(), op);
-
-        } catch (GatewayException e) {
-            this.logger.error("Failed to acknowledge payment", e);
-            throw new WebApplicationException( e );
-        } catch (InvalidEntityException e) {
-            this.logger.error("Failed to acknowledge payment", e);
-            throw new WebApplicationException( e );
-        } catch (EntityAlreadyExistsException e) {
+                observationManager.notify(new PaymentOperationEvent(), op);
+            }
+            else {
+                this.logger.error("Payment gateway {} did not return a valid response !", gatewayId);
+                throw new WebApplicationException();
+            }
+        } catch (GatewayException | InvalidEntityException | EntityAlreadyExistsException e) {
             this.logger.error("Failed to acknowledge payment", e);
             throw new WebApplicationException( e );
         }
@@ -93,5 +94,17 @@ public class PaymentResource implements Resource
         }
 
         return Response.ok().build();
+    }
+
+    /**
+     * Some payment gateways call IPN as GET requests. Support those as well.
+     */
+    @GET
+    @Path("{orderId}/" + ACKNOWLEDGEMENT_PATH + "/{gatewayId}")
+    public Response acknowledgePaymentGet(
+            @PathParam("gatewayId") String gatewayId, @PathParam("orderId") UUID orderId,
+            @Context UriInfo uriInfo)
+    {
+        return this.acknowledgePayment(gatewayId, orderId, uriInfo.getQueryParameters());
     }
 }

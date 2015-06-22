@@ -7,18 +7,16 @@
  */
 package org.mayocat.shop.checkout.front;
 
-import java.math.BigDecimal;
+import com.google.common.base.Optional;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
 import java.math.RoundingMode;
 import java.net.URI;
-import java.net.URISyntaxException;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
-
-import javax.annotation.Nullable;
 import javax.inject.Inject;
 import javax.inject.Provider;
 import javax.ws.rs.Consumes;
@@ -32,9 +30,7 @@ import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.MultivaluedMap;
 import javax.ws.rs.core.Response;
 import javax.ws.rs.core.UriInfo;
-
 import org.apache.commons.lang3.StringUtils;
-import org.apache.commons.validator.routines.EmailValidator;
 import org.joda.money.CurrencyUnit;
 import org.joda.money.Money;
 import org.joda.money.format.MoneyAmountStyle;
@@ -51,31 +47,30 @@ import org.mayocat.rest.annotation.ExistingTenant;
 import org.mayocat.shop.billing.model.Order;
 import org.mayocat.shop.billing.model.OrderItem;
 import org.mayocat.shop.billing.store.OrderStore;
+import org.mayocat.shop.catalog.model.Product;
+import org.mayocat.shop.catalog.store.ProductStore;
 import org.mayocat.shop.checkout.CheckoutException;
 import org.mayocat.shop.checkout.CheckoutRegister;
+import org.mayocat.shop.checkout.CheckoutRequest;
 import org.mayocat.shop.checkout.CheckoutResponse;
+import org.mayocat.shop.checkout.CheckoutSettings;
 import org.mayocat.shop.checkout.RegularCheckoutException;
+import org.mayocat.shop.checkout.internal.CheckoutRequestBuilder;
 import org.mayocat.shop.customer.model.Address;
 import org.mayocat.shop.customer.model.Customer;
+import org.mayocat.shop.customer.store.AddressStore;
+import org.mayocat.shop.customer.store.CustomerStore;
 import org.mayocat.shop.front.views.WebView;
 import org.mayocat.url.URLHelper;
 import org.slf4j.Logger;
 import org.xwiki.component.annotation.Component;
-
-import com.fasterxml.jackson.annotation.JsonValue;
-import com.google.common.base.Optional;
-import com.google.common.base.Predicate;
-import com.google.common.base.Strings;
-import com.google.common.collect.FluentIterable;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
 
 /**
  * @version $Id$
  */
 @Component(CheckoutResource.PATH)
 @Path(CheckoutResource.PATH)
-@Produces({ MediaType.TEXT_HTML, MediaType.APPLICATION_JSON })
+@Produces({MediaType.TEXT_HTML, MediaType.APPLICATION_JSON})
 @Consumes(MediaType.APPLICATION_FORM_URLENCODED)
 @ExistingTenant
 public class CheckoutResource implements Resource
@@ -85,6 +80,15 @@ public class CheckoutResource implements Resource
     public static final String PAYMENT_RETURN_PATH = "return";
 
     public static final String PAYMENT_CANCEL_PATH = "cancel";
+
+    @Inject
+    private Provider<CustomerStore> customerStore;
+
+    @Inject
+    private Provider<AddressStore> addressStore;
+
+    @Inject
+    private Provider<ProductStore> productStore;
 
     @Inject
     private CheckoutRegister checkoutRegister;
@@ -110,159 +114,93 @@ public class CheckoutResource implements Resource
     @Inject
     private Logger logger;
 
-    public CheckoutResource()
-    {
-    }
-
-    private enum ErrorType
-    {
-        REQUIRED,
-        BAD_VALUE;
-
-        @JsonValue
-        public String toJson()
-        {
-            return name().toLowerCase();
-        }
-    }
-
-    private class Error
-    {
-        private String userMessage;
-
-        private ErrorType errorType;
-
-        public Error(ErrorType type, String userMessage)
-        {
-            this.errorType = type;
-            this.userMessage = userMessage;
-        }
-
-        public String getUserMessage()
-        {
-            return userMessage;
-        }
-
-        public ErrorType getErrorType()
-        {
-            return errorType;
-        }
-    }
-
     @POST
-    public Object checkout(final MultivaluedMap data)
-    {
-        Map<String, Error> errors = Maps.newHashMap();
-        String email = null;
+    public Object checkout(final MultivaluedMap data) {
 
-        if (data.containsKey("email")) {
-            email = (String) data.getFirst("email");
-            EmailValidator emailValidator = EmailValidator.getInstance(false);
-            if (!emailValidator.isValid(email)) {
-                Error error = new Error(ErrorType.BAD_VALUE, "email is not valid");
-                errors.put("email", error);
-            }
+        CheckoutSettings checkoutSettings = configurationService.getSettings(CheckoutSettings.class);
+        if (webContext.getUser() == null && !checkoutSettings.isGuestCheckoutEnabled().getValue()) {
+            return Response.status(Response.Status.FORBIDDEN).
+                    entity("Configuration does not allow guest checkout").build();
+        }
+
+        CheckoutRequest checkoutRequest;
+        if (webContext.getUser() != null) {
+            Customer customer = customerStore.get().findByUserId(webContext.getUser().getId());
+            Address deliveryAddress = addressStore.get().findByCustomerIdAndType(customer.getId(), "delivery");
+            Address billingAddress = addressStore.get().findByCustomerIdAndType(customer.getId(), "billing");
+            checkoutRequest = new CheckoutRequest();
+            checkoutRequest.setCustomer(customer);
+            checkoutRequest.setBillingAddress(billingAddress);
+            checkoutRequest.setDeliveryAddress(deliveryAddress);
         } else {
-            Error error = new Error(ErrorType.REQUIRED, "email is mandatory");
-            errors.put("email", error);
+            CheckoutRequestBuilder builder = new CheckoutRequestBuilder();
+            checkoutRequest = builder.build(data);
         }
 
-        String firstName = getNonEmptyFieldValueOrAddToErrorMap("firstName", data, errors);
-        String lastName = getNonEmptyFieldValueOrAddToErrorMap("lastName", data, errors);
-        String street = getNonEmptyFieldValueOrAddToErrorMap("street", data, errors);
-        String zip = getNonEmptyFieldValueOrAddToErrorMap("zip", data, errors);
-        String city = getNonEmptyFieldValueOrAddToErrorMap("city", data, errors);
-        String country = getNonEmptyFieldValueOrAddToErrorMap("country", data, errors);
-
-        Address billingAddress = null;
-        boolean hasDifferentBillingAddress =
-                FluentIterable.from(Arrays.asList("street", "zip", "city", "country")).anyMatch(new Predicate<String>()
-                {
-                    public boolean apply(@Nullable String input)
-                    {
-                        return data.containsKey("billing" + StringUtils.capitalize(input)) && StringUtils.isNotBlank(
-                                (String) data.getFirst("billing" + StringUtils.capitalize(input)));
-                    }
-                });
-        if (hasDifferentBillingAddress) {
-            String billingStreet = getNonEmptyFieldValueOrAddToErrorMap("billingStreet", data, errors);
-            String billingZip = getNonEmptyFieldValueOrAddToErrorMap("billingZip", data, errors);
-            String billingCity = getNonEmptyFieldValueOrAddToErrorMap("billingCity", data, errors);
-            String billingCountry = getNonEmptyFieldValueOrAddToErrorMap("billingCountry", data, errors);
-            billingAddress = new Address();
-            billingAddress.setFullName(firstName + " " + lastName);
-            billingAddress.setStreet(billingStreet);
-            billingAddress.setZip(billingZip);
-            billingAddress.setCity(billingCity);
-            billingAddress.setCountry(billingCountry);
-            if (data.containsKey("billingCompany")) {
-                String company = (String) data.getFirst("billingCompany");
-                if (!Strings.isNullOrEmpty(company)) {
-                    billingAddress.setCompany(company);
-                }
-                String streetComplement = (String) data.getFirst("billingStreetComplement");
-                if (!Strings.isNullOrEmpty(streetComplement)) {
-                    billingAddress.setStreetComplement(streetComplement);
-                }
-            }
-        }
-
-        if (errors.keySet().size() > 0) {
+        if (checkoutRequest.getErrors().size() != 0) {
             Map<String, Object> bindings = new HashMap<>();
 
             bindings.put("request", data);
-            bindings.put("errors", errors);
-
+            bindings.put("errors", checkoutRequest.getErrors());
             return new WebView().template("checkout/form.html").with(WebView.Option.FALLBACK_ON_DEFAULT_THEME)
                     .data(bindings);
         }
 
-        Customer customer = new Customer();
-        customer.setEmail(email);
-        customer.setFirstName(firstName);
-        customer.setLastName(lastName);
-        if (data.containsKey("phone") && !Strings.isNullOrEmpty((String) data.getFirst("phone"))) {
-            customer.setPhoneNumber((String) data.getFirst("phone"));
-        }
-
-        Address deliveryAddress = new Address();
-        deliveryAddress.setFullName(firstName + " " + lastName);
-        deliveryAddress.setStreet(street);
-        deliveryAddress.setZip(zip);
-        deliveryAddress.setCity(city);
-        deliveryAddress.setCountry(country);
-        if (data.containsKey("company")) {
-            String company = (String) data.getFirst("company");
-            if (!Strings.isNullOrEmpty(company)) {
-                deliveryAddress.setCompany(company);
-            }
-            String streetComplement = (String) data.getFirst("streetComplement");
-            if (!Strings.isNullOrEmpty(streetComplement)) {
-                deliveryAddress.setStreetComplement(streetComplement);
-            }
-        }
-
-        Map<String, Object> otherOrderData = Maps.newHashMap();
-
-        // Include additional information if the field is present and not empty
-        if (data.containsKey("additionalInformation") &&
-                !Strings.isNullOrEmpty((String) data.getFirst("additionalInformation")))
-        {
-            otherOrderData.put("additionalInformation", data.getFirst("additionalInformation"));
-        }
-
         try {
-            CheckoutResponse response =
-                    checkoutRegister.checkout(customer, deliveryAddress, billingAddress, otherOrderData);
+            CheckoutResponse response;
+            if (data.containsKey("product")) {
+                // Direct checkout
+                Product product = productStore.get().findBySlug((String) data.getFirst("product"));
+
+                if (product == null) {
+                    return Response.status(Response.Status.BAD_REQUEST).entity("Direct checkout product not found").build();
+                }
+
+                Long quantity;
+                if (data.containsKey("quantity")) {
+                    try {
+                        quantity = Long.parseLong((String) data.getFirst("quantity"));
+                    } catch (NumberFormatException e) {
+                        return Response.status(Response.Status.BAD_REQUEST).entity("Malformed quantity.").build();
+                    }
+                } else {
+                    quantity = 1l;
+                }
+                response = checkoutRegister.directCheckout(checkoutRequest, product, quantity);
+
+            } else {
+                // Cart checkout
+                response = checkoutRegister.checkoutCart(checkoutRequest);
+            }
+
             if (response.getRedirectURL().isPresent()) {
                 return Response.seeOther(new URI(response.getRedirectURL().get())).build();
+            } else if (response.getFormURL().isPresent()) {
+                Map<String, Object> bindings = new HashMap<>();
+                bindings.put("formURL", response.getFormURL().get());
+                bindings.put("paymentData", response.getData());
+
+                // Also add the payment data keys in the response. This can be useful for JSON clients
+                // Since keys are not ordered in JSON, objects keys are not ordered, and for some
+                // payment gateways, respecting the order of keys is mandatory.
+                bindings.put("paymentDataKeys", response.getData().keySet());
+
+                return new WebView().template("checkout/payment.html").with(WebView.Option.FALLBACK_ON_DEFAULT_THEME)
+                        .data(bindings);
             } else {
                 Map<String, Object> bindings = new HashMap<>();
-                bindings.put("errors", errors);
-                bindings.putAll(prepareMailContext(response.getOrder(), customer, Optional.fromNullable(billingAddress),
-                        Optional.fromNullable(deliveryAddress), webContext.getTenant(),
-                        configurationService.getSettings(
-                                GeneralSettings.class).getLocales().getMainLocale().getValue()));
+
+                bindings.putAll(
+                        prepareMailContext(
+                                response.getOrder(),
+                                checkoutRequest.getCustomer(),
+                                Optional.fromNullable(checkoutRequest.getBillingAddress()),
+                                Optional.fromNullable(checkoutRequest.getDeliveryAddress()),
+                                webContext.getTenant(),
+                                configurationService.getSettings(GeneralSettings.class).getLocales().getMainLocale().getValue()
+                        )
+                );
+
                 return new WebView().template("checkout/success.html").with(WebView.Option.FALLBACK_ON_DEFAULT_THEME)
                         .data(bindings);
             }
@@ -281,41 +219,15 @@ public class CheckoutResource implements Resource
     }
 
     @GET
-    public Object checkout()
-    {
-        if (checkoutRegister.requiresForm()) {
+    public Object checkout() {
             Map<String, Object> bindings = new HashMap<>();
             return new WebView().template("checkout/form.html").with(WebView.Option.FALLBACK_ON_DEFAULT_THEME)
                     .data(bindings);
-        } else {
-            try {
-                CheckoutResponse response =
-                        checkoutRegister.checkout(null, null, null, Maps.<String, Object>newHashMap());
-
-                if (response.getRedirectURL().isPresent()) {
-                    return Response.seeOther(new URI(response.getRedirectURL().get())).build();
-                }
-            } catch (final CheckoutException e) {
-                Map<String, Object> bindings = new HashMap<>();
-                bindings.put("exception", new HashMap<String, Object>()
-                {
-                    {
-                        put("message", e.getMessage());
-                    }
-                });
-                return new WebView().template("checkout/exception.html")
-                        .with(WebView.Option.FALLBACK_ON_DEFAULT_THEME).data(bindings);
-            } catch (URISyntaxException e) {
-                e.printStackTrace();
-            }
-        }
-        return Response.ok().build();
     }
 
     @GET
     @Path(PAYMENT_RETURN_PATH + "/{order}")
-    public WebView returnFromExternalPaymentService(@Context UriInfo uriInfo, @PathParam("order") String orderId)
-    {
+    public WebView returnFromExternalPaymentService(@Context UriInfo uriInfo, @PathParam("order") String orderId) {
         Map<String, Object> bindings = new HashMap<>();
         if (StringUtils.isNotBlank(orderId)) {
             Order order = orderStore.get().findById(UUID.fromString(orderId));
@@ -336,8 +248,7 @@ public class CheckoutResource implements Resource
 
     @GET
     @Path(PAYMENT_CANCEL_PATH + "/{orderId}")
-    public WebView cancelFromExternalPaymentService(@PathParam("orderId") UUID orderId)
-    {
+    public WebView cancelFromExternalPaymentService(@PathParam("orderId") UUID orderId) {
         try {
             checkoutRegister.dropOrder(orderId);
         } catch (final CheckoutException e) {
@@ -362,17 +273,6 @@ public class CheckoutResource implements Resource
                 .data(bindings);
     }
 
-    private String getNonEmptyFieldValueOrAddToErrorMap(String field, MultivaluedMap data, Map<String, Error> errors)
-    {
-        if (!data.containsKey(field) || Strings.isNullOrEmpty((String) data.getFirst(field))) {
-            Error error = new Error(ErrorType.REQUIRED, StringUtils.capitalize(field) + " is mandatory");
-            errors.put(field, error);
-            return null;
-        } else {
-            return (String) data.getFirst(field);
-        }
-    }
-
     /**
      * Prepares the JSON context for an order mail notification
      *
@@ -385,9 +285,7 @@ public class CheckoutResource implements Resource
      * @return a JSON context as map
      */
     private Map<String, Object> prepareMailContext(Order order, Customer customer, Optional<Address> ba,
-            Optional<Address> da, Tenant tenant, Locale locale)
-    {
-        Map<String, Object> orderData = order.getOrderData();
+                                                   Optional<Address> da, Tenant tenant, Locale locale) {
         List<OrderItem> items = order.getOrderItems();
         Map<String, Object> context = Maps.newHashMap();
 
@@ -459,8 +357,7 @@ public class CheckoutResource implements Resource
      * @param address the address to get the context of
      * @return the prepared context
      */
-    private Map<String, Object> prepareAddressContext(Address address)
-    {
+    private Map<String, Object> prepareAddressContext(Address address) {
         Map<String, Object> addressContext = Maps.newHashMap();
         addressContext.put("street", address.getStreet());
         addressContext.put("streetComplement", address.getStreetComplement());

@@ -27,8 +27,6 @@ public class ThemeGestaltConfigurationSource implements GestaltConfigurationSour
     @Inject
     private ThemeSettings themeSettings;
 
-    private List<ThemeDefinition> themes;
-
     @Override
     public Object get()
     {

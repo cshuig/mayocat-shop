@@ -20,6 +20,7 @@ import org.mayocat.shop.cart.Cart
 import org.mayocat.shop.cart.CartManager
 import org.mayocat.shop.cart.web.object.CartWebObject
 import org.mayocat.shop.checkout.CheckoutRegister
+import org.mayocat.shop.checkout.CheckoutRequest
 import org.mayocat.shop.checkout.CheckoutResponse
 import org.mayocat.shop.checkout.CheckoutSettings
 import org.mayocat.shop.customer.model.Address
@@ -85,7 +86,7 @@ class MarketplaceCheckoutWebView implements Resource
     @POST
     public Object checkout(CheckoutWebObject checkoutWebObject)
     {
-        if (!webContext.user && !checkoutSettings.isGuestCheckoutEnabled()) {
+        if (!webContext.user && !checkoutSettings.isGuestCheckoutEnabled().value) {
             return Response.status(Response.Status.FORBIDDEN).
                     entity("Configuration does not allow guest checkout").build()
         } else if (!webContext.user) {
@@ -112,9 +113,17 @@ class MarketplaceCheckoutWebView implements Resource
         CartWebObject cartWebObject = new CartWebObject()
         cartWebObject.withCart(shippingService, cart, locale, [] as List<Image>, platformSettings, Optional.absent())
 
+        CheckoutRequest request = new CheckoutRequest();
+        request.customer = customer
+        request.deliveryAddress = deliveryAddress
+        request.billingAddress = billingAddress
+        otherData.keySet().each({ String key ->
+            request.putOtherOrderData(key, otherData.get(key))
+        })
+
         try {
-            CheckoutResponse response = checkoutRegister.
-                    checkout(customer, deliveryAddress, billingAddress, otherData);
+            CheckoutResponse response = checkoutRegister.checkoutCart(request);
+
             CheckoutResponseWebObject checkoutResponseWebObject = new CheckoutResponseWebObject();
             if (response.getRedirectURL().isPresent()) {
                 checkoutResponseWebObject.redirection = response.getRedirectURL().get()
